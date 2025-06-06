@@ -1,4 +1,5 @@
-# docker build . -f wsclean_casa.Dockerfile -t wsclean_casa && docker run -it wsclean_casa /bin/bash
+# docker build . -f wsclean_casa.Dockerfile -t wsclean_casa --progress=plain && \
+# docker run --rm -it --entrypoint=/bin/bash wsclean_casa -l
 
 # ---------------------------
 # Builder Stage: Build environment, install dependencies, and generate Spack view
@@ -38,6 +39,13 @@ RUN git clone https://gitlab.com/ska-telescope/sdp/ska-sdp-spack.git /opt/ska-sd
 
 # Create a new Spack environment which writes to /opt
 # mount buildcache for faster builds.
+# create and activate a spack env
+# find external deps installed in previous step, except python
+# setup buildcache
+# specify view location
+# add packages to the env
+# concretize the env
+# install env
 RUN --mount=type=cache,target=/opt/buildcache \
     mkdir -p /opt/{software,spack_env,view} && \
     spack env create --dir /opt/spack_env && \
@@ -53,53 +61,19 @@ RUN --mount=type=cache,target=/opt/buildcache \
     spack concretize && \
     spack install --no-check-signature --fail-fast --no-checksum -j1
 
-# && \
-# spack gc -y
-
-# Optionally, reduce the size by stripping binaries
-# RUN find -L /opt/view/* -type f -exec strip -s {} \;
-
-# ---------------------------
-# Final Stage: Create a lean runtime image
-# ---------------------------
-# FROM images.canfar.net/skaha/base-notebook:latest AS runtime
-FROM ubuntu:22.04 AS runtime
-
-# Install minimal dependencies needed to bootstrap spack env
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get --no-install-recommends install -y \
-    python3 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Create symlinks for python and pip
-RUN ln -sf /usr/bin/python3 /usr/bin/python
-
-# Copy necessary files from builder
-COPY --from=builder /opt/software /opt/software
-COPY --from=builder /opt/view /opt/view
-COPY --from=builder /opt/spack_env /opt/spack_env
-COPY --from=builder /opt/spack /opt/spack
-COPY --from=builder /opt/ska-sdp-spack /opt/ska-sdp-spack
-
-# Setup Spack environment
-ENV SPACK_ROOT=/opt/spack \
-    PATH=/opt/view/bin:/opt/software/bin:/usr/local/bin:/usr/bin:/bin
-RUN . /opt/spack/share/spack/setup-env.sh && \
-    spack repo add /opt/ska-sdp-spack && \
+# create and add a demo spack repo
+# spack add install additional in the previous env
+RUN mkdir -p /opt/demo-spack
+COPY repo.yaml /opt/demo-spack/repo.yaml
+COPY packages /opt/demo-spack/packages
+RUN --mount=type=cache,target=/opt/buildcache \
     spack env activate /opt/spack_env && \
-    echo ". /opt/spack/share/spack/setup-env.sh" >>/etc/profile.d/spack.sh && \
-    echo "spack env activate /opt/spack_env" >>/etc/profile.d/spack.sh && \
+    spack repo add /opt/demo-spack && \
+    spack add py-ducc && \
+    spack concretize --force && \
+    spack install --no-check-signature --fail-fast --no-checksum -j1
+
+# make it so that spack is available in the container (with bash -l)
+RUN echo ". /opt/spack/share/spack/setup-env.sh" >> /etc/profile.d/spack.sh && \
+    echo "spack env activate /opt/spack_env" >> /etc/profile.d/spack.sh && \
     . /etc/profile.d/spack.sh
-
-# Create a startup script that activates the environment
-RUN echo '#!/bin/bash' >/usr/local/bin/entrypoint.sh && \
-    echo 'source /opt/spack/share/spack/setup-env.sh' >>/usr/local/bin/entrypoint.sh && \
-    echo 'spack env activate /opt/spack_env' >>/usr/local/bin/entrypoint.sh && \
-    echo 'exec "$@"' >>/usr/local/bin/entrypoint.sh && \
-    chmod +x /usr/local/bin/entrypoint.sh
-
-# Set the entrypoint to our custom script
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["/bin/bash", "-l"]
